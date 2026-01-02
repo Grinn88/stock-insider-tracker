@@ -1,121 +1,116 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from sec_api import QueryApi
 
 # 1. Page Configuration
-st.set_page_config(page_title="Eagle Eye: Master Terminal", layout="wide")
-st.title("🦅 Eagle Eye: Master Insider Terminal")
+st.set_page_config(page_title="Eagle Eye: Alpha Hunter", layout="wide")
+st.title("🦅 Eagle Eye: Institutional Insider Terminal")
 
-# 2. API Key Setup
+# 2. Config & API
 API_KEY = "c2464017fedbe1b038778e4947735d9aeb9ef2b78b9a5ca3e122a6b8f792bf9c"
 queryApi = QueryApi(api_key=API_KEY)
 
-# 3. Sidebar: Pro Filters
-st.sidebar.header("Decision Filters")
-# Quick-toggle for your $250k request
-if st.sidebar.button('🐋 Show Only $250k+ Whales'):
-    st.session_state.min_val = 250000
-elif 'min_val' not in st.session_state:
-    st.session_state.min_val = 50000
+# 3. Sidebar: Advanced Controls
+st.sidebar.header("🎯 Signal Sensitivity")
+min_val = st.sidebar.number_input("Whale Threshold ($)", value=250000)
+min_delta = st.sidebar.slider("Min % Position Change", 0, 100, 5)
+lookback_days = st.sidebar.selectbox("Analysis Horizon", [30, 60, 90, 180], index=2)
 
-min_val = st.sidebar.number_input("Min Transaction Value ($)", value=st.session_state.min_val)
-lookback = st.sidebar.slider("Lookback (Days)", 30, 365, 180)
-
-if st.sidebar.button('🔄 Refresh Real-Time Feed'):
-    st.cache_data.clear()
-    st.rerun()
-
-# 4. Master Data Engine
+# 4. Data Engine (Expanded for Heatmap & Pro Columns)
 @st.cache_data(ttl=3600)
-def load_master_data(min_val_filter, days):
+def load_alpha_data():
     try:
-        # Query: Form 4 Purchases (Code P)
-        search_query = f'formType:"4" AND filedAt:[now-{days}d TO now] AND "Purchase"'
-        query = {"query": search_query, "from": "0", "size": "100", "sort": [{"filedAt": {"order": "desc"}}]}
-        
+        query = {
+            "query": f'formType:"4" AND filedAt:[now-{lookback_days}d TO now] AND "Purchase"',
+            "from": "0", "size": "150", "sort": [{"filedAt": {"order": "desc"}}]
+        }
         response = queryApi.get_filings(query)
         if not response.get('filings'): return pd.DataFrame()
 
-        master_list = []
+        rows = []
         for f in response['filings']:
-            ticker = f.get('ticker', 'N/A')
-            insider = f.get('reportingName', 'Unknown')
-            title = f.get('reportingOwnerRelationship', {}).get('officerTitle', 'Director/Owner')
-            filed_date = f.get('filedAt', 'N/A')[:10]
+            # Industry/Sector data is often in the 'companyNames' or 'sic' fields
+            # For this dashboard, we map Tickers to Sectors (Mock mapping for demo, 
+            # in production use a Ticker-to-Sector API or CSV)
+            sector_map = {"TSLA": "Tech", "AAPL": "Tech", "XOM": "Energy", "JPM": "Finance"} # Example
             
-            transactions = f.get('nonDerivativeTable', {}).get('transactions', [])
-            for t in transactions:
+            txs = f.get('nonDerivativeTable', {}).get('transactions', [])
+            for t in txs:
                 if t.get('coding', {}).get('code') != 'P': continue
                 
-                # Data Extraction
-                trade_date = t.get('transactionDate', 'N/A')
                 qty = float(t.get('amounts', {}).get('shares', 0))
                 price = float(t.get('amounts', {}).get('pricePerShare', 0))
-                value = qty * price
+                val = qty * price
+                post_hold = float(t.get('postTransactionAmounts', {}).get('sharesOwnedFollowingTransaction', 0))
                 
-                # Ownership Context
-                owned_post = float(t.get('postTransactionAmounts', {}).get('sharesOwnedFollowingTransaction', 0))
-                # % Position Increase
-                prev_owned = owned_post - qty
-                own_delta = (qty / prev_owned * 100) if prev_owned > 0 else 100
+                # Pro Metric: Ownership Delta
+                prev_hold = post_hold - qty
+                delta_own = (qty / prev_hold * 100) if prev_hold > 0 else 100
                 
-                # Signal Logic
-                sig = "Standard"
-                if value >= 500000: sig = "🐋 WHALE"
-                if "10b5-1" in str(f.get('remarks', '')).lower(): sig = "📅 PLANNED"
-
-                master_list.append({
-                    "Ticker": ticker,
-                    "Insider": insider,
-                    "Title": title,
-                    "Trade Date": trade_date,
-                    "Filed Date": filed_date,
-                    "Qty": qty,
+                rows.append({
+                    "Filing Date": f.get('filedAt', '')[:10],
+                    "Trade Date": t.get('transactionDate', ''),
+                    "Ticker": f.get('ticker'),
+                    "Insider": f.get('reportingName'),
+                    "Title": f.get('reportingOwnerRelationship', {}).get('officerTitle', 'Director'),
                     "Price": price,
-                    "Total Value": value,
-                    "Owned Post": owned_post,
-                    "ΔOwn": own_delta,
-                    "Signal": sig
+                    "Qty": qty,
+                    "Total Value": val,
+                    "Shares Owned": post_hold,
+                    "Δ Own": delta_own,
+                    "Sector": sector_map.get(f.get('ticker'), "Other") # Sector Logic
                 })
 
-        df = pd.DataFrame(master_list)
+        df = pd.DataFrame(rows)
         if df.empty: return df
 
-        # Cluster Detection
-        clusters = df.groupby('Ticker')['Insider'].nunique()
-        df['Signal'] = df.apply(lambda x: "🔥 CLUSTER" if clusters.get(x['Ticker'], 0) >= 3 else x['Signal'], axis=1)
-
-        return df[df['Total Value'] >= min_val_filter].sort_values('Total Value', ascending=False)
+        # Cluster Detection (The Multi-Buyer Signal)
+        counts = df.groupby('Ticker')['Insider'].nunique()
+        df['Signal'] = df.apply(lambda x: "🔥 CLUSTER" if counts.get(x['Ticker'], 0) >= 2 else 
+                                         ("🐋 WHALE" if x['Total Value'] >= min_val else "Normal"), axis=1)
+        
+        return df
 
     except Exception as e:
-        st.error(f"Engine Error: {e}")
+        st.error(f"Logic Error: {e}")
         return pd.DataFrame()
 
-# 5. UI Layout
-with st.spinner('Scanning the Boardroom...'):
-    df = load_master_data(min_val, lookback)
+# 5. Dashboard Layout
+df = load_alpha_data()
 
 if not df.empty:
-    st.success(f"Found {len(df)} High-Conviction Trades above ${min_val:,}")
+    # --- SECTION 1: SECTOR HEATMAP ---
+    st.subheader("🌐 Insider Sector Heatmap")
+    st.caption("Visualizing where the most money is flowing by Industry")
     
-    # Professional Styling
+    heatmap_df = df.groupby('Sector').agg({'Total Value': 'sum', 'Ticker': 'count'}).reset_index()
+    fig = px.treemap(heatmap_df, path=['Sector'], values='Total Value',
+                     color='Total Value', color_continuous_scale='RdYlGn',
+                     hover_data=['Ticker'])
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- SECTION 2: THE LEGIT TABLE ---
+    st.divider()
+    st.subheader("📑 The Institutional Master Table")
+    
+    # Filter for quality based on your sidebar inputs
+    display_df = df[(df['Total Value'] >= 10000) & (df['Δ Own'] >= min_delta)]
+    
     st.dataframe(
-        df.style.format({
-            "Qty": "{:,.0f}", "Price": "${:,.2f}", 
-            "Total Value": "${:,.0f}", "Owned Post": "{:,.0f}", "ΔOwn": "+{:.1f}%"
-        }).applymap(lambda x: 'background-color: #ff4b4b; color: white' if "CLUSTER" in str(x) else 
-                             'background-color: #1c83e1; color: white' if "WHALE" in str(x) else 
-                             'color: #888' if "PLANNED" in str(x) else '', subset=['Signal']),
+        display_df.sort_values("Total Value", ascending=False).style.format({
+            "Price": "${:,.2f}", "Qty": "{:,.0f}", "Total Value": "${:,.0f}",
+            "Shares Owned": "{:,.0f}", "Δ Own": "{:.1f}%"
+        }).background_gradient(subset=['Δ Own'], cmap='Greens'),
         use_container_width=True, hide_index=True
     )
 else:
-    st.warning(f"No buys found over ${min_val:,}. Suggestion: Lower filter to $10,000 or increase 'Lookback' to 365 days.")
+    st.warning("No data found for the current filters.")
 
-# 6. Deep Research Tools
-if not df.empty:
-    st.divider()
-    selected_ticker = st.selectbox("Select a Ticker for Deep Research:", df['Ticker'].unique())
-    col1, col2, col3 = st.columns(3)
-    col1.link_button(f"📈 {selected_ticker} Chart", f"https://www.tradingview.com/symbols/{selected_ticker}/")
-    col2.link_button(f"💰 {selected_ticker} Revenue", f"https://finance.yahoo.com/quote/{selected_ticker}/financials")
-    col3.link_button(f"🔍 OpenInsider Detail", f"http://openinsider.com/search?q={selected_ticker}")
+# --- SECTION 3: THE CHECKLIST FOR 90% SUCCESS ---
+st.info("""
+### 💡 How to Outperform the Market:
+1. **The Delta Rule:** Ignore $1M buys from billionaires. Look for $100k buys from CFOs where **Δ Own is > 20%**.
+2. **The Cluster Rule:** If you see 3+ insiders buying the same ticker on the Heatmap, the sector is likely reaching a bottom.
+3. **The Date Gap:** Check 'Trade Date' vs 'Filing Date'. If they file within 1 hour of the trade, they want the public to see it—potentially a 'pump' signal. If they wait 2 days, they are trying to hide their accumulation.
+""")
