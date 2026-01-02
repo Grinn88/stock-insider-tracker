@@ -3,73 +3,138 @@ import pandas as pd
 from sec_api import QueryApi
 from datetime import datetime, timedelta
 import pytz
+import os
 
-# 1. Setup & Configuration
-st.set_page_config(page_title="Eagle Eye: Credit-Safe", layout="wide")
+# -------------------------
+# 1. APP CONFIG
+# -------------------------
+st.set_page_config(
+    page_title="Eagle Eye: Insider Whales",
+    layout="wide"
+)
 
-API_KEY = "c2464017fedbe1b038778e4947735d9aeb9ef2b78b9a5ca3e122a6b8f792bf9c"
+# -------------------------
+# 2. API SETUP (SECURE)
+# -------------------------
+API_KEY = os.getenv("SEC_API_KEY")
+if not API_KEY:
+    st.error("SEC_API_KEY not found. Set it as an environment variable.")
+    st.stop()
+
 queryApi = QueryApi(api_key=API_KEY)
 
-# 2. CREDIT GUARD: Check if the SEC is even open
-def is_sec_open():
-    # SEC EDGAR usually operates Mon-Fri, 6:00 AM - 10:00 PM ET
-    tz = pytz.timezone('US/Eastern')
-    now = datetime.now(tz)
-    if now.weekday() >= 5: # Saturday or Sunday
-        return False
-    return True
+# -------------------------
+# 3. CACHE LAYER (CREDIT SHIELD)
+# -------------------------
+@st.cache_data(ttl=3600)
+def fetch_insider_data(days_back: int, min_value: int) -> pd.DataFrame:
+    start_date = (datetime.utcnow() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+    end_date = datetime.utcnow().strftime('%Y-%m-%d')
 
-# 3. INTELLIGENT CACHING: Save credits by storing results for 1 hour
-@st.cache_data(ttl=3600) # 3600 seconds = 1 Hour. This is your "Credit Shield"
-def fetch_data_with_cache(days_back, min_threshold):
-    # Only calculate the start date once
-    start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    
-    lucene_query = f'formType:"4" AND filedAt:[{start_date} TO {end_date}] AND nonDerivativeTable.transactions.coding.code:P'
-    
+    lucene_query = (
+        'formType:"4" AND '
+        'nonDerivativeTable.transactions.coding.code:P AND '
+        'filedAt:[{start} TO {end}]'
+    ).format(start=start_date, end=end_date)
+
     payload = {
         "query": lucene_query,
-        "from": "0", "size": "100",
+        "from": 0,
+        "size": 200,
         "sort": [{"filedAt": {"order": "desc"}}]
     }
-    
-    response = queryApi.get_filings(payload)
-    filings = response.get('filings', [])
-    
-    data = []
-    for f in filings:
-        txs = f.get('nonDerivativeTable', {}).get('transactions', [])
-        for t in txs:
-            if t.get('coding', {}).get('code') == 'P':
-                val = float(t.get('amounts', {}).get('shares', 0)) * float(t.get('amounts', {}).get('pricePerShare', 0))
-                if val >= min_threshold:
-                    data.append({
-                        "Date": f.get('filedAt', '')[:10],
-                        "Ticker": f.get('ticker'),
-                        "Insider": f.get('reportingName'),
-                        "Value ($)": val,
-                        "Price": float(t.get('amounts', {}).get('pricePerShare', 0)),
-                        "10b5-1": "Yes" if "10b5-1" in str(f).lower() else "No"
-                    })
-    return pd.DataFrame(data)
 
-# 4. Sidebar Strategy
-st.sidebar.header("🛡️ Credit Management")
-st.sidebar.info(f"Cache active: Data refreshes every 60 mins to save credits.")
+    try:
+        response = queryApi.get_filings(payload)
+    except Exception as e:
+        st.error(f"SEC API error: {e}")
+        return pd.DataFrame()
 
-lookback = st.sidebar.selectbox("Horizon", [30, 60, 90])
-whale_limit = st.sidebar.selectbox("Min Trade Value", [250000, 500000, 1000000])
+    rows = []
 
-# 5. Execution Logic
-if not is_sec_open():
-    st.sidebar.warning("🌙 SEC is currently closed. Using last cached data.")
+    for filing in response.get("filings", []):
+        insider_name = filing.get("reportingName")
+        ticker = filing.get("ticker")
+        filed_date = filing.get("filedAt", "")[:10]
 
-df = fetch_data_with_cache(lookback, whale_limit)
+        # Role filtering (HIGH SIGNAL)
+        role = filing.get("reportingOwnerRelationship", {})
+        if not any([
+            role.get("isDirector"),
+            role.get("isOfficer")
+        ]):
+            continue
 
-# 6. UI Output
-if not df.empty:
-    st.title(f"🦅 Insider Whales over ${whale_limit:,}")
-    st.dataframe(df.sort_values("Value ($)", ascending=False), use_container_width=True, hide_index=True)
+        title = role.get("officerTitle", "")
+
+        txs = filing.get("nonDerivativeTable", {}).get("transactions", [])
+        for tx in txs:
+            amounts = tx.get("amounts", {})
+            shares = float(amounts.get("shares", 0))
+            price = float(amounts.get("pricePerShare", 0))
+            value = shares * price
+
+            if value < min_value:
+                continue
+
+            rows.append({
+                "Date": filed_date,
+                "Ticker": ticker,
+                "Insider": insider_name,
+                "Role": title if title else "Director",
+                "Shares": int(shares),
+                "Price": round(price, 2),
+                "Value ($)": round(value, 0),
+                "10b5-1": tx.get("coding", {}).get("footnoteId") is not None
+            })
+
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return df
+
+    # -------------------------
+    # 4. CLUSTER LOGIC (EDGE)
+    # -------------------------
+    cluster_counts = df.groupby("Ticker")["Insider"].nunique()
+    df["Cluster Size"] = df["Ticker"].map(cluster_counts)
+
+    df["Cluster Flag"] = df["Cluster Size"] >= 2
+
+    return df
+
+# -------------------------
+# 5. SIDEBAR CONTROLS
+# -------------------------
+st.sidebar.header("🛡 Insider Filters")
+
+lookback = st.sidebar.selectbox("Lookback Window (days)", [30, 60, 90])
+min_trade = st.sidebar.selectbox("Minimum Trade Value ($)", [250_000, 500_000, 1_000_000])
+
+# -------------------------
+# 6. EXECUTION
+# -------------------------
+df = fetch_insider_data(lookback, min_trade)
+
+# -------------------------
+# 7. UI OUTPUT
+# -------------------------
+st.title("🦅 Insider Whale Dashboard")
+
+if df.empty:
+    st.warning("No qualifying insider purchases found.")
 else:
-    st.warning("No new data found. Your credits are safe.")
+    st.metric(
+        "Unique Tickers",
+        df["Ticker"].nunique()
+    )
+    st.metric(
+        "Cluster Buys",
+        df[df["Cluster Flag"]]["Ticker"].nunique()
+    )
+
+    st.dataframe(
+        df.sort_values(["Cluster Flag", "Value ($)"], ascending=[False, False]),
+        use_container_width=True,
+        hide_index=True
+    )
