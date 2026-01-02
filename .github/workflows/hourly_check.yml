@@ -26,4 +26,4 @@ jobs:
         env:
           SEC_API_KEY: ${{ secrets.SEC_API_KEY }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        run: python insider_tracker.py
+        run: python insider.tracker.py
