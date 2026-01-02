@@ -1,1 +1,6 @@
+name: Insider Tracker Automation
 
+on:
+  schedule:
+    - cron: '0 * * * *'  # This triggers the script every hour, on the hour
+  workflow_dispatch:      # This adds a "Run workflow" button so you can test it manually
