@@ -1,114 +1,91 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 from sec_api import QueryApi
 
-# 1. Page Config
-st.set_page_config(page_title="Eagle Eye Pro", layout="wide")
-st.title("🦅 Eagle Eye: Institutional Terminal")
+# 1. Page Configuration
+st.set_page_config(page_title="Pro Insider Screener", layout="wide")
+st.title("🦅 Eagle Eye: Full-Screener Dashboard")
 
-# 2. API Setup
+# 2. API Key Setup
 API_KEY = "c2464017fedbe1b038778e4947735d9aeb9ef2b78b9a5ca3e122a6b8f792bf9c"
 queryApi = QueryApi(api_key=API_KEY)
 
-# 3. Sidebar
-st.sidebar.header("🎯 Filters")
-min_val = st.sidebar.number_input("Min Value ($)", value=100000)
-lookback = st.sidebar.slider("Days Lookback", 7, 365, 90)
+# 3. Sidebar Filtering
+st.sidebar.header("Advanced Filters")
+min_val = st.sidebar.slider("Min Trade Value ($)", 0, 1000000, 50000, step=50000)
+if st.sidebar.button('🔄 Sync with SEC'):
+    st.cache_data.clear()
+    st.rerun()
 
+# 4. Data Loader with OpenInsider Mapping
 @st.cache_data(ttl=3600)
-def load_fixed_data():
+def load_and_map_data():
     try:
-        # Search for Form 4 Purchases
-        query = {
-            "query": f'formType:"4" AND filedAt:[now-{lookback}d TO now] AND "Purchase"',
-            "from": "0", "size": "100", "sort": [{"filedAt": {"order": "desc"}}]
-        }
-        response = queryApi.get_filings(query)
-        filings = response.get('filings', [])
+        # Querying for Open Market Purchases (Code P)
+        search_query = 'formType:"4" AND filedAt:[now-300d TO now] AND "Purchase"'
+        query = {"query": search_query, "from": "0", "size": "50", "sort": [{"filedAt": {"order": "desc"}}]}
         
-        extracted_data = []
-        for f in filings:
-            # RELIABLE FILING DATE
-            filed_date = f.get('filedAt', 'N/A')[:10]
+        response = queryApi.get_filings(query)
+        if not response.get('filings'): return pd.DataFrame()
+
+        rows = []
+        for f in response['filings']:
             ticker = f.get('ticker', 'N/A')
-            insider = f.get('reportingName', 'N/A')
+            insider = f.get('reportingName', 'Unknown')
+            filed_date = f.get('filedAt', '')[:10]
             
-            # Navigate to transactions
-            txs = f.get('nonDerivativeTable', {}).get('transactions', [])
-            for t in txs:
+            # Navigating to transaction table (Table I of Form 4)
+            transactions = f.get('nonDerivativeTable', {}).get('transactions', [])
+            for t in transactions:
                 if t.get('coding', {}).get('code') != 'P': continue
                 
-                # RELIABLE TRADE DATE (Found inside transactionDate)
-                trade_date = t.get('transactionDate', filed_date) 
-                
-                qty = float(t.get('amounts', {}).get('shares', 0))
+                # Calculations
+                shares = float(t.get('amounts', {}).get('shares', 0))
                 price = float(t.get('amounts', {}).get('pricePerShare', 0))
-                total_val = qty * price
-                post_shares = float(t.get('postTransactionAmounts', {}).get('sharesOwnedFollowingTransaction', 0))
+                value = shares * price
                 
-                # Ownership Change Calculation
-                pre_shares = post_shares - qty
-                pct_change = (qty / pre_shares * 100) if pre_shares > 0 else 100
+                # Shares remaining (Post-transaction holdings)
+                post_holdings = float(t.get('postTransactionAmounts', {}).get('sharesOwnedFollowingTransaction', 0))
                 
-                # Industry Mapping (SEC SIC Codes)
-                sic = str(f.get('sic', '0000'))
-                sector = "Tech" if sic.startswith('35') else "Finance" if sic.startswith('6') else "Healthcare" if sic.startswith('28') else "Energy" if sic.startswith('13') else "Misc"
+                # Change % (How much did they increase their position?)
+                prev_holdings = post_holdings - shares
+                own_change = (shares / prev_holdings * 100) if prev_holdings > 0 else 100
+                
+                # Check for 10b5-1 (Pre-planned)
+                is_planned = "Yes" if "10b5-1" in str(f.get('remarks', '')).lower() else "No"
 
-                extracted_data.append({
-                    "Filed": filed_date,
-                    "Traded": trade_date,
+                rows.append({
+                    "Filing Date": filed_date,
                     "Ticker": ticker,
-                    "Insider": insider,
-                    "Title": f.get('reportingOwnerRelationship', {}).get('officerTitle', 'Director'),
-                    "Qty": qty,
-                    "Price": price,
-                    "Value ($)": total_val,
-                    "Owned Post": post_shares,
-                    "Δ Own": pct_change,
-                    "Sector": sector,
-                    "10b5-1": "Yes" if "10b5-1" in str(f).lower() else "No"
+                    "Insider Name": insider,
+                    "Shares": f"{shares:,.0f}",
+                    "Price": f"${price:,.2f}",
+                    "Value ($)": value,
+                    "Owned Post": f"{post_holdings:,.0f}",
+                    "ΔOwn": f"{own_change:.1f}%",
+                    "10b5-1": is_planned
                 })
+
+        df = pd.DataFrame(rows)
+        if df.empty: return df
         
-        return pd.DataFrame(extracted_data)
+        # Add Cluster Logic
+        cluster_counts = df.groupby('Ticker')['Insider Name'].nunique()
+        df['Signal'] = df['Ticker'].apply(lambda x: "🔥 CLUSTER" if cluster_counts.get(x, 0) >= 3 else "")
+        
+        return df[df['Value ($)'] >= min_val].sort_values('Value ($)', ascending=False)
+
     except Exception as e:
         st.error(f"Error: {e}")
         return pd.DataFrame()
 
-# 4. Dashboard UI
-df = load_fixed_data()
-
-if not df.empty:
-    # --- SECTOR HEATMAP ---
-    st.subheader("🌐 Capital Flow by Sector")
-    fig = px.treemap(df, path=['Sector', 'Ticker'], values='Value ($)', 
-                     color='Value ($)', color_continuous_scale='RdYlGn')
-    st.plotly_chart(fig, use_container_width=True)
-
-    # --- THE TABLE ---
-    st.subheader("📑 The Master Feed")
-    # Filter by value
-    final_df = df[df['Value ($)'] >= min_val].sort_values("Value ($)", ascending=False)
+# 5. Dashboard View
+df_final = load_and_map_data()
+if not df_final.empty:
+    # Formatting Value for display
+    display_df = df_final.copy()
+    display_df['Value ($)'] = display_df['Value ($)'].apply(lambda x: f"${x:,.0f}")
     
-    st.dataframe(
-        final_df.style.format({
-            "Qty": "{:,.0f}", "Price": "${:,.2f}", "Value ($)": "${:,.0f}",
-            "Owned Post": "{:,.0f}", "Δ Own": "{:.1f}%"
-        }).background_gradient(subset=['Δ Own'], cmap='YlGn'),
-        use_container_width=True, hide_index=True
-    )
-    
-    # --- SMART ANALYSIS ---
-    
-    st.divider()
-    col1, col2 = st.columns(2)
-    with col1:
-        st.success("🔥 **CLUSTER ALERT**")
-        clusters = final_df['Ticker'].value_counts()
-        st.write(clusters[clusters >= 2])
-    with col2:
-        st.info("🐋 **WHALE ALERT**")
-        st.write(final_df[final_df['Value ($)'] >= 500000][['Ticker', 'Insider', 'Value ($)']])
-
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 else:
-    st.warning("No trades found. Lower the 'Min Value' in the sidebar.")
+    st.warning("No data matches your current 'Min Trade Value' filter.")
