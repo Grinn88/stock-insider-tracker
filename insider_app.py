@@ -2,45 +2,46 @@ import streamlit as st
 import pandas as pd
 from sec_api import QueryApi
 from datetime import datetime, timedelta
-import pytz
 import os
 
-# -------------------------
+# --------------------------------------------------
 # 1. APP CONFIG
-# -------------------------
+# --------------------------------------------------
 st.set_page_config(
-    page_title="Eagle Eye: Insider Whales",
+    page_title="Eagle Eye – Insider Whale Tracker",
     layout="wide"
 )
 
-# -------------------------
+st.title("🦅 Eagle Eye: Insider Whale Tracker")
+
+# --------------------------------------------------
 # 2. API SETUP (SECURE)
-# -------------------------
+# --------------------------------------------------
 API_KEY = os.getenv("SEC_API_KEY")
+
 if not API_KEY:
-    st.error("SEC_API_KEY not found. Set it as an environment variable.")
+    st.error("❌ SEC_API_KEY not found. Set it as an environment variable.")
     st.stop()
 
 queryApi = QueryApi(api_key=API_KEY)
 
-# -------------------------
-# 3. CACHE LAYER (CREDIT SHIELD)
-# -------------------------
+# --------------------------------------------------
+# 3. DATA FETCH (CACHED)
+# --------------------------------------------------
 @st.cache_data(ttl=3600)
-def fetch_insider_data(days_back: int, min_value: int) -> pd.DataFrame:
-    start_date = (datetime.utcnow() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-    end_date = datetime.utcnow().strftime('%Y-%m-%d')
+def fetch_insider_buys(days_back: int, min_value: int) -> pd.DataFrame:
+    start_date = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+    end_date = datetime.utcnow().strftime("%Y-%m-%d")
 
-    lucene_query = (
-        'formType:"4" AND '
-        'nonDerivativeTable.transactions.coding.code:P AND '
-        'filedAt:[{start} TO {end}]'
-    ).format(start=start_date, end=end_date)
+    lucene_query = f'''
+        formType:"4"
+        AND filedAt:[{start_date} TO {end_date}]
+    '''
 
     payload = {
         "query": lucene_query,
         "from": 0,
-        "size": 200,
+        "size": 300,
         "sort": [{"filedAt": {"order": "desc"}}]
     }
 
@@ -50,25 +51,29 @@ def fetch_insider_data(days_back: int, min_value: int) -> pd.DataFrame:
         st.error(f"SEC API error: {e}")
         return pd.DataFrame()
 
+    filings = response.get("filings", [])
     rows = []
 
-    for filing in response.get("filings", []):
-        insider_name = filing.get("reportingName")
+    for filing in filings:
         ticker = filing.get("ticker")
+        insider = filing.get("reportingName")
         filed_date = filing.get("filedAt", "")[:10]
 
-        # Role filtering (HIGH SIGNAL)
-        role = filing.get("reportingOwnerRelationship", {})
-        if not any([
-            role.get("isDirector"),
-            role.get("isOfficer")
-        ]):
+        role_info = filing.get("reportingOwnerRelationship", {})
+        role = (
+            role_info.get("officerTitle")
+            if role_info.get("isOfficer")
+            else "Director" if role_info.get("isDirector") else "Other"
+        )
+
+        transactions = filing.get("nonDerivativeTable", {}).get("transactions", [])
+        if not transactions:
             continue
 
-        title = role.get("officerTitle", "")
+        for tx in transactions:
+            if tx.get("coding", {}).get("code") != "P":
+                continue
 
-        txs = filing.get("nonDerivativeTable", {}).get("transactions", [])
-        for tx in txs:
             amounts = tx.get("amounts", {})
             shares = float(amounts.get("shares", 0))
             price = float(amounts.get("pricePerShare", 0))
@@ -80,12 +85,11 @@ def fetch_insider_data(days_back: int, min_value: int) -> pd.DataFrame:
             rows.append({
                 "Date": filed_date,
                 "Ticker": ticker,
-                "Insider": insider_name,
-                "Role": title if title else "Director",
+                "Insider": insider,
+                "Role": role,
                 "Shares": int(shares),
                 "Price": round(price, 2),
-                "Value ($)": round(value, 0),
-                "10b5-1": tx.get("coding", {}).get("footnoteId") is not None
+                "Value ($)": round(value, 0)
             })
 
     df = pd.DataFrame(rows)
@@ -93,48 +97,54 @@ def fetch_insider_data(days_back: int, min_value: int) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # -------------------------
-    # 4. CLUSTER LOGIC (EDGE)
-    # -------------------------
-    cluster_counts = df.groupby("Ticker")["Insider"].nunique()
-    df["Cluster Size"] = df["Ticker"].map(cluster_counts)
-
-    df["Cluster Flag"] = df["Cluster Size"] >= 2
+    # --------------------------------------------------
+    # 4. CLUSTER LOGIC (REAL SIGNAL)
+    # --------------------------------------------------
+    df["Cluster Size"] = df.groupby("Ticker")["Insider"].transform("nunique")
+    df["Cluster Buy"] = df["Cluster Size"] >= 2
 
     return df
 
-# -------------------------
+# --------------------------------------------------
 # 5. SIDEBAR CONTROLS
-# -------------------------
-st.sidebar.header("🛡 Insider Filters")
+# --------------------------------------------------
+st.sidebar.header("🎯 Insider Filters")
 
-lookback = st.sidebar.selectbox("Lookback Window (days)", [30, 60, 90])
-min_trade = st.sidebar.selectbox("Minimum Trade Value ($)", [250_000, 500_000, 1_000_000])
+lookback = st.sidebar.selectbox("Lookback (days)", [30, 60, 90], index=0)
+min_trade = st.sidebar.selectbox(
+    "Minimum Trade Value ($)",
+    [150_000, 250_000, 500_000, 1_000_000],
+    index=1
+)
 
-# -------------------------
+# --------------------------------------------------
 # 6. EXECUTION
-# -------------------------
-df = fetch_insider_data(lookback, min_trade)
+# --------------------------------------------------
+df = fetch_insider_buys(lookback, min_trade)
 
-# -------------------------
-# 7. UI OUTPUT
-# -------------------------
-st.title("🦅 Insider Whale Dashboard")
-
+# --------------------------------------------------
+# 7. OUTPUT
+# --------------------------------------------------
 if df.empty:
-    st.warning("No qualifying insider purchases found.")
-else:
-    st.metric(
-        "Unique Tickers",
-        df["Ticker"].nunique()
-    )
-    st.metric(
-        "Cluster Buys",
-        df[df["Cluster Flag"]]["Ticker"].nunique()
-    )
+    st.warning("No qualifying insider purchases found. This is normal for high-signal filters.")
+    st.stop()
 
-    st.dataframe(
-        df.sort_values(["Cluster Flag", "Value ($)"], ascending=[False, False]),
-        use_container_width=True,
-        hide_index=True
-    )
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Buys", len(df))
+col2.metric("Unique Tickers", df["Ticker"].nunique())
+col3.metric("Cluster Buys", df[df["Cluster Buy"]]["Ticker"].nunique())
+
+st.subheader("📊 Insider Purchases (Sorted by Conviction)")
+
+st.dataframe(
+    df.sort_values(
+        by=["Cluster Buy", "Value ($)"],
+        ascending=[False, False]
+    ),
+    use_container_width=True,
+    hide_index=True
+)
+
+st.caption(
+    "Note: Empty periods are expected. Insider conviction events are rare by design."
+)
