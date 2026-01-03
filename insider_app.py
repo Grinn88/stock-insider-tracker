@@ -5,26 +5,42 @@ from datetime import datetime, timedelta
 
 # 1. Dashboard Configuration
 st.set_page_config(page_title="Eagle Eye: FMP Terminal", layout="wide")
-st.title("🦅 Eagle Eye: Institutional Alpha Engine (FMP Edition)")
+st.title("🦅 Eagle Eye: Institutional Alpha Engine")
 
 # 2. Setup API
-# Replace with your FMP API Key
+# Using the key you provided
 API_KEY = "YRByZglolMGVabAR6rOWHzeumPey2CBH"
 
 # 3. Sidebar Pro-Filters
 st.sidebar.header("🎯 Signal Sensitivity")
-# FMP provides recent trades; we'll pull a large batch and filter by date in Python
 whale_threshold = st.sidebar.selectbox("Whale Threshold ($)", [100000, 250000, 500000, 1000000], index=1)
 lookback_days = st.sidebar.slider("Lookback Period (Days)", 7, 90, 30)
 
-# 4. FMP Data Engine
+# 4. Data Engine (Updated URL and Headers)
 @st.cache_data(ttl=3600)
 def load_fmp_insider_data(days):
     try:
-        # FMP 'Latest' endpoint provides a stream of recent Form 4s
-        # We use a high limit (400) to ensure we cover the lookback period
-        url = f"https://financialmodelingprep.com/api/v4/insider-trading?limit=400&apikey={API_KEY}"
-        response = requests.get(url)
+        # FIX 1: Using the 'stable' path which is more reliable for new keys
+        # URL: /stable/insider-trading/latest
+        url = "https://financialmodelingprep.com/stable/insider-trading/latest"
+        
+        params = {
+            "limit": 500,
+            "apikey": API_KEY
+        }
+        
+        # FIX 2: Added User-Agent header to prevent 403 Forbidden blocks
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        response = requests.get(url, params=params, headers=headers)
+        
+        # Detailed error handling for the 403
+        if response.status_code == 403:
+            st.error("🚫 403 Forbidden: Your API key may not have access to this endpoint or FMP is blocking the request. Verify your plan at site.financialmodelingprep.com")
+            return pd.DataFrame()
+            
         response.raise_for_status()
         trades = response.json()
         
@@ -32,81 +48,70 @@ def load_fmp_insider_data(days):
         results = []
         
         for t in trades:
-            # Parse the date from FMP (usually 'yyyy-mm-dd hh:mm:ss')
-            filing_date_str = t.get('filingDate', '').split(' ')[0]
-            if not filing_date_str: continue
-            filing_date = datetime.strptime(filing_date_str, '%Y-%m-%d').date()
+            # FMP Date parsing
+            f_date_str = t.get('filingDate', '').split(' ')[0]
+            if not f_date_str: continue
+            f_date = datetime.strptime(f_date_str, '%Y-%m-%d').date()
             
-            # Filter by Date and Transaction Type (P-Purchase is Open Market Buy)
-            if filing_date >= cutoff_date and t.get('transactionType') == 'P-Purchase':
-                ticker = t.get('symbol', 'N/A')
-                insider = t.get('reportingName', 'N/A')
+            if f_date >= cutoff_date and t.get('transactionType') == 'P-Purchase':
                 qty = float(t.get('securitiesTransacted', 0))
                 price = float(t.get('price', 0))
                 value = qty * price
                 
                 # Ownership Delta calculation
-                post_shares = float(t.get('securitiesOwned', 0))
-                pre_shares = post_shares - qty
-                delta = (qty / pre_shares * 100) if pre_shares > 0 else 100
+                post = float(t.get('securitiesOwned', 0))
+                pre = post - qty
+                delta = (qty / pre * 100) if pre > 0 else 100
 
                 results.append({
-                    "Date": filing_date_str,
-                    "Ticker": ticker,
-                    "Insider": insider,
+                    "Date": f_date_str,
+                    "Ticker": t.get('symbol', 'N/A'),
+                    "Insider": t.get('reportingName', 'N/A'),
                     "Title": t.get('typeOfOwner', 'N/A'),
                     "Value ($)": value,
                     "Price": price,
                     "Qty": qty,
-                    "Owned Post": post_shares,
+                    "Owned Post": post,
                     "Δ Own": delta
                 })
                 
         return pd.DataFrame(results)
     except Exception as e:
-        st.error(f"FMP API Error: {e}")
+        st.error(f"Engine Error: {e}")
         return pd.DataFrame()
 
-# 5. Logic & UI
+# 5. UI Presentation
 df_raw = load_fmp_insider_data(lookback_days)
 
 if not df_raw.empty:
-    # Filter by user-selected whale threshold
     df = df_raw[df_raw['Value ($)'] >= whale_threshold].copy()
     
     if not df.empty:
-        # Cluster Detection (2+ unique insiders buying the same ticker)
+        # Cluster Detection
         clusters = df.groupby('Ticker')['Insider'].nunique()
         df['Signal'] = df['Ticker'].map(lambda x: "🔥 CLUSTER" if clusters[x] >= 2 else "🐋 WHALE")
 
-        # Metrics
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Whale Buys", len(df))
-        c2.metric("Total Capital Inflow", f"${df['Value ($)'].sum():,.0f}")
-        c3.metric("Avg Buy Size", f"${df['Value ($)'].mean():,.0f}")
+        # Top Level Metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Whale Trades", len(df))
+        m2.metric("Total Capital Inflow", f"${df['Value ($)'].sum():,.0f}")
+        m3.metric("Max Position Increase", f"{df['Δ Own'].max():.1f}%")
 
-        # Visualization
-        st.subheader(f"📑 Insider Activity (Last {lookback_days} Days)")
-        
-        # Style the dataframe
-        styled_df = df.sort_values("Value ($)", ascending=False).style.format({
-            "Value ($)": "${:,.0f}", 
-            "Price": "${:,.2f}", 
-            "Qty": "{:,.0f}", 
-            "Owned Post": "{:,.0f}", 
-            "Δ Own": "{:.1f}%"
-        }).applymap(
-            lambda x: 'background-color: #ff4b4b; color: white; font-weight: bold' if x == "🔥 CLUSTER" else '', 
-            subset=['Signal']
+        # Data Table
+        st.subheader(f"📑 High-Conviction Buys (Last {lookback_days} Days)")
+        st.dataframe(
+            df.sort_values("Value ($)", ascending=False).style.format({
+                "Value ($)": "${:,.0f}", "Price": "${:,.2f}", 
+                "Qty": "{:,.0f}", "Owned Post": "{:,.0f}", "Δ Own": "{:.1f}%"
+            }).applymap(lambda x: 'background-color: #ff4b4b; color: white' if x == "🔥 CLUSTER" else '', subset=['Signal']),
+            use_container_width=True, hide_index=True
         )
-        
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.warning(f"No buys found above ${whale_threshold:,} in the last {lookback_days} days.")
+        st.warning(f"No buys found above ${whale_threshold:,}. Try a lower threshold.")
 else:
-    st.info("Gathering data from FMP... If this takes too long, check your internet connection or API key.")
+    st.info("No data returned. If the 403 error persists, check your FMP dashboard for plan restrictions.")
 
-# 6. Refresh Button
-if st.sidebar.button("🔄 Refresh Data"):
+# 6. Refresh
+if st.sidebar.button("🔄 Force Refresh"):
     st.cache_data.clear()
     st.rerun()
