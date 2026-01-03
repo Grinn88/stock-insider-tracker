@@ -4,61 +4,80 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-st.set_page_config(page_title="Eagle Eye: Free Terminal", layout="wide")
-st.title("🦅 Eagle Eye: Institutional Alpha Engine")
-st.caption("Direct SEC EDGAR Feed (100% Free & Unlimited)")
+# --- CONFIGURATION ---
+SEC_CONTACT = "rohansofra81@gmail.com" # Required by SEC for fair access
+WHALE_LIMIT = 250000
 
-# 1. Sidebar - SEC Compliance Requirement
-st.sidebar.header("🛡️ SEC Access Identity")
-user_email = st.sidebar.text_input("Your Email (Required by SEC)", "rohansofra81@gmail.com")
+st.set_page_config(page_title="Eagle Eye Free", layout="wide")
+st.title("🦅 Eagle Eye: Whale & Cluster Tracker")
 
-# 2. Free Data Engine
-@st.cache_data(ttl=600) # Refresh every 10 mins
-def fetch_sec_feed(email):
-    # Public SEC feed for all Form 4s (Insider Trades)
+# --- DATA ENGINE ---
+@st.cache_data(ttl=600)
+def get_sec_data():
+    # Direct Atom Feed (Always Free)
     url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&owner=only&start=0&count=100&output=atom"
-    headers = {"User-Agent": f"EagleEye Tracker ({email})"}
+    
+    # CRITICAL: These specific headers prevent the "403 Forbidden" error
+    headers = {
+        "User-Agent": f"EagleEye Research ({SEC_CONTACT})",
+        "Accept-Encoding": "gzip, deflate",
+        "Host": "www.sec.gov"
+    }
     
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
-        # Parse XML
         root = ET.fromstring(response.content)
         ns = {'atom': 'http://www.w3.org/2005/Atom'}
         
-        data = []
+        results = []
         for entry in root.findall('atom:entry', ns):
             title = entry.find('atom:title', ns).text
-            # Format: "4 - TICKER - Insider Name"
-            parts = title.split(' - ')
-            if len(parts) >= 3:
+            # Format usually: "4 - TICKER - NAME (CIK)"
+            try:
+                parts = title.split(' - ')
                 ticker = parts[1]
                 insider = parts[2].split(' (')[0]
-                date = entry.find('atom:updated', ns).text[:10]
                 link = entry.find('atom:link', ns).attrib['href']
+                date = entry.find('atom:updated', ns).text[:10]
                 
-                data.append({
+                results.append({
                     "Date": date,
                     "Ticker": ticker,
                     "Insider": insider,
                     "Link": link
                 })
-        return pd.DataFrame(data)
+            except: continue
+            
+        return pd.DataFrame(results)
     except Exception as e:
-        st.error(f"SEC Feed Error: {e}")
+        st.error(f"SEC Access Error: {e}")
         return pd.DataFrame()
 
-# 3. UI logic
-if user_email:
-    df = fetch_sec_feed(user_email)
-    if not df.empty:
-        st.subheader("🔥 Latest Insider Filings (Real-Time)")
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        
-        # Quick filter
-        search = st.text_input("🔍 Filter by Ticker (e.g. TSLA, NVDA)")
-        if search:
-            st.write(df[df['Ticker'].str.contains(search.upper())])
-    else:
-        st.warning("No data found or SEC blocked the request. Ensure email is valid.")
+# --- DASHBOARD UI ---
+df = get_sec_data()
+
+if not df.empty:
+    # 1. Cluster Detection
+    ticker_counts = df.groupby('Ticker').size()
+    clusters = ticker_counts[ticker_counts >= 2].index.tolist()
+    
+    st.sidebar.header("Filter Results")
+    show_clusters = st.sidebar.toggle("Show Only Clusters 🔥", value=False)
+    
+    display_df = df.copy()
+    if show_clusters:
+        display_df = display_df[display_df['Ticker'].isin(clusters)]
+
+    # 2. Key Metrics
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Filings", len(df))
+    c2.metric("Clusters Detected", len(clusters))
+    c3.metric("Last Update", datetime.now().strftime("%H:%M"))
+
+    # 3. Data Table
+    st.subheader("Live Insider Feed")
+    st.dataframe(display_df, use_container_width=True)
+else:
+    st.info("No data returned. The SEC might be rate-limiting the Streamlit Cloud IP. Try refreshing in 5 minutes.")
