@@ -1,77 +1,41 @@
 import os
 import requests
+import xml.etree.ElementTree as ET
 import smtplib
 from email.message import EmailMessage
-from collections import defaultdict
 
-# 1. Setup (Using GitHub Secrets)
-API_KEY = os.environ.get('FMP_API_KEY') # Updated name for clarity
-SENDER_PASSWORD = os.environ.get('EMAIL_PASSWORD') 
+# Configuration
+SEC_EMAIL = "rohansofra81@gmail.com" # Identify yourself to SEC
 SENDER_EMAIL = "rohansofra81@gmail.com"
-RECEIVER_EMAIL = "rohansofra81@gmail.com"
+SENDER_PASS = os.environ.get('EMAIL_PASSWORD')
 
-def hunt_signals():
-    # FMP Endpoint for latest insider trades
-    # We pull the last 100 trades to ensure coverage between runs
-    url = f"https://financialmodelingprep.com/api/v4/insider-trading?limit=100&apikey={API_KEY}"
+def run_free_tracker():
+    # 1. Fetch from SEC RSS
+    url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&owner=only&start=0&count=40&output=atom"
+    headers = {"User-Agent": f"InsiderBot ({SEC_EMAIL})"}
     
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        trades = response.json()
-    except Exception as e:
-        print(f"❌ API Error: {e}")
-        return
+    response = requests.get(url, headers=headers)
+    root = ET.fromstring(response.content)
+    ns = {'atom': 'http://www.w3.org/2005/Atom'}
+    
+    signals = []
+    for entry in root.findall('atom:entry', ns):
+        title = entry.find('atom:title', ns).text
+        link = entry.find('atom:link', ns).attrib['href']
+        signals.append(f"• {title}\nLink: {link}\n")
 
-    whale_alerts = []
-    ticker_buyers = defaultdict(set)
-    ticker_details = {}
-
-    for t in trades:
-        # FMP uses 'P-Purchase' for open market buys
-        if t.get('transactionType') == 'P-Purchase':
-            ticker = t.get('symbol')
-            insider = t.get('reportingName')
-            qty = float(t.get('securitiesTransacted', 0))
-            price = float(t.get('price', 0))
-            value = qty * price
-            date = t.get('filingDate', '')[:10]
-            
-            # Track Clusters (Unique buyers per ticker)
-            ticker_buyers[ticker].add(insider)
-            ticker_details[ticker] = {"date": date, "value": value}
-            
-            # Identify Whales ($250k+)
-            if value >= 250000:
-                whale_alerts.append(f"🐋 WHALE: {ticker} | {insider} | ${value:,.0f} (at ${price:.2f})")
-
-    # Filter for Clusters (2+ unique buyers)
-    cluster_alerts = []
-    for ticker, buyers in ticker_buyers.items():
-        if len(buyers) >= 2:
-            cluster_alerts.append(f"🔥 CLUSTER: {ticker} ({len(buyers)} insiders buying) | Latest: {ticker_details[ticker]['date']}")
-
-    # 3. Send Email
-    if whale_alerts or cluster_alerts:
+    if signals:
+        # 2. Send Email
         msg = EmailMessage()
-        msg['Subject'] = f"🚨 Insider Signal: {len(whale_alerts)} Whales | {len(cluster_alerts)} Clusters"
+        msg['Subject'] = f"🚨 Eagle Eye: {len(signals)} New Insider Filings"
         msg['From'] = SENDER_EMAIL
-        msg['To'] = RECEIVER_EMAIL
-        
-        body = "Eagle Eye FMP Alert Report:\n\n"
-        if whale_alerts:
-            body += "--- WHALES ($250k+) ---\n" + "\n".join(whale_alerts) + "\n\n"
-        if cluster_alerts:
-            body += "--- CLUSTERS (2+ Insiders) ---\n" + "\n".join(cluster_alerts)
-        
-        msg.set_content(body)
+        msg['To'] = SENDER_EMAIL
+        msg.set_content("The following insiders just filed Form 4s with the SEC:\n\n" + "\n".join(signals))
 
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
+            smtp.login(SENDER_EMAIL, SENDER_PASS)
             smtp.send_message(msg)
-        print("✅ Alert email sent successfully via FMP!")
-    else:
-        print("No significant activity found in this run.")
+        print("✅ Free SEC Alert Sent!")
 
 if __name__ == "__main__":
-    hunt_signals()
+    run_free_tracker()
