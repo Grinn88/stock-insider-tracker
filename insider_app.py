@@ -1,117 +1,64 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
+import xml.etree.ElementTree as ET
+from datetime import datetime
 
-# 1. Dashboard Configuration
-st.set_page_config(page_title="Eagle Eye: FMP Terminal", layout="wide")
+st.set_page_config(page_title="Eagle Eye: Free Terminal", layout="wide")
 st.title("🦅 Eagle Eye: Institutional Alpha Engine")
+st.caption("Direct SEC EDGAR Feed (100% Free & Unlimited)")
 
-# 2. Setup API
-# Using the key you provided
-API_KEY = "YRByZglolMGVabAR6rOWHzeumPey2CBH"
+# 1. Sidebar - SEC Compliance Requirement
+st.sidebar.header("🛡️ SEC Access Identity")
+user_email = st.sidebar.text_input("Your Email (Required by SEC)", "rohansofra81@gmail.com")
 
-# 3. Sidebar Pro-Filters
-st.sidebar.header("🎯 Signal Sensitivity")
-whale_threshold = st.sidebar.selectbox("Whale Threshold ($)", [100000, 250000, 500000, 1000000], index=1)
-lookback_days = st.sidebar.slider("Lookback Period (Days)", 7, 90, 30)
-
-# 4. Data Engine (Updated URL and Headers)
-@st.cache_data(ttl=3600)
-def load_fmp_insider_data(days):
+# 2. Free Data Engine
+@st.cache_data(ttl=600) # Refresh every 10 mins
+def fetch_sec_feed(email):
+    # Public SEC feed for all Form 4s (Insider Trades)
+    url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&owner=only&start=0&count=100&output=atom"
+    headers = {"User-Agent": f"EagleEye Tracker ({email})"}
+    
     try:
-        # FIX 1: Using the 'stable' path which is more reliable for new keys
-        # URL: /stable/insider-trading/latest
-        url = "https://financialmodelingprep.com/stable/insider-trading/latest"
-        
-        params = {
-            "limit": 500,
-            "apikey": API_KEY
-        }
-        
-        # FIX 2: Added User-Agent header to prevent 403 Forbidden blocks
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        response = requests.get(url, params=params, headers=headers)
-        
-        # Detailed error handling for the 403
-        if response.status_code == 403:
-            st.error("🚫 403 Forbidden: Your API key may not have access to this endpoint or FMP is blocking the request. Verify your plan at site.financialmodelingprep.com")
-            return pd.DataFrame()
-            
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
-        trades = response.json()
         
-        cutoff_date = (datetime.now() - timedelta(days=days)).date()
-        results = []
+        # Parse XML
+        root = ET.fromstring(response.content)
+        ns = {'atom': 'http://www.w3.org/2005/Atom'}
         
-        for t in trades:
-            # FMP Date parsing
-            f_date_str = t.get('filingDate', '').split(' ')[0]
-            if not f_date_str: continue
-            f_date = datetime.strptime(f_date_str, '%Y-%m-%d').date()
-            
-            if f_date >= cutoff_date and t.get('transactionType') == 'P-Purchase':
-                qty = float(t.get('securitiesTransacted', 0))
-                price = float(t.get('price', 0))
-                value = qty * price
+        data = []
+        for entry in root.findall('atom:entry', ns):
+            title = entry.find('atom:title', ns).text
+            # Format: "4 - TICKER - Insider Name"
+            parts = title.split(' - ')
+            if len(parts) >= 3:
+                ticker = parts[1]
+                insider = parts[2].split(' (')[0]
+                date = entry.find('atom:updated', ns).text[:10]
+                link = entry.find('atom:link', ns).attrib['href']
                 
-                # Ownership Delta calculation
-                post = float(t.get('securitiesOwned', 0))
-                pre = post - qty
-                delta = (qty / pre * 100) if pre > 0 else 100
-
-                results.append({
-                    "Date": f_date_str,
-                    "Ticker": t.get('symbol', 'N/A'),
-                    "Insider": t.get('reportingName', 'N/A'),
-                    "Title": t.get('typeOfOwner', 'N/A'),
-                    "Value ($)": value,
-                    "Price": price,
-                    "Qty": qty,
-                    "Owned Post": post,
-                    "Δ Own": delta
+                data.append({
+                    "Date": date,
+                    "Ticker": ticker,
+                    "Insider": insider,
+                    "Link": link
                 })
-                
-        return pd.DataFrame(results)
+        return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Engine Error: {e}")
+        st.error(f"SEC Feed Error: {e}")
         return pd.DataFrame()
 
-# 5. UI Presentation
-df_raw = load_fmp_insider_data(lookback_days)
-
-if not df_raw.empty:
-    df = df_raw[df_raw['Value ($)'] >= whale_threshold].copy()
-    
+# 3. UI logic
+if user_email:
+    df = fetch_sec_feed(user_email)
     if not df.empty:
-        # Cluster Detection
-        clusters = df.groupby('Ticker')['Insider'].nunique()
-        df['Signal'] = df['Ticker'].map(lambda x: "🔥 CLUSTER" if clusters[x] >= 2 else "🐋 WHALE")
-
-        # Top Level Metrics
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Whale Trades", len(df))
-        m2.metric("Total Capital Inflow", f"${df['Value ($)'].sum():,.0f}")
-        m3.metric("Max Position Increase", f"{df['Δ Own'].max():.1f}%")
-
-        # Data Table
-        st.subheader(f"📑 High-Conviction Buys (Last {lookback_days} Days)")
-        st.dataframe(
-            df.sort_values("Value ($)", ascending=False).style.format({
-                "Value ($)": "${:,.0f}", "Price": "${:,.2f}", 
-                "Qty": "{:,.0f}", "Owned Post": "{:,.0f}", "Δ Own": "{:.1f}%"
-            }).applymap(lambda x: 'background-color: #ff4b4b; color: white' if x == "🔥 CLUSTER" else '', subset=['Signal']),
-            use_container_width=True, hide_index=True
-        )
+        st.subheader("🔥 Latest Insider Filings (Real-Time)")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        # Quick filter
+        search = st.text_input("🔍 Filter by Ticker (e.g. TSLA, NVDA)")
+        if search:
+            st.write(df[df['Ticker'].str.contains(search.upper())])
     else:
-        st.warning(f"No buys found above ${whale_threshold:,}. Try a lower threshold.")
-else:
-    st.info("No data returned. If the 403 error persists, check your FMP dashboard for plan restrictions.")
-
-# 6. Refresh
-if st.sidebar.button("🔄 Force Refresh"):
-    st.cache_data.clear()
-    st.rerun()
+        st.warning("No data found or SEC blocked the request. Ensure email is valid.")
