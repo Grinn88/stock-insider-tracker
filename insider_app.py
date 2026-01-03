@@ -1,41 +1,32 @@
-import os
-import requests
-import xml.etree.ElementTree as ET
+import streamlit as st
 import pandas as pd
-from datetime import datetime
 
-SEC_CONTACT = "rohansofra81@gmail.com"
+st.set_page_config(page_title="Eagle Eye Dashboard", layout="wide")
+st.title("🦅 Eagle Eye: Insider Terminal")
 
-def fetch_and_save():
-    url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&owner=only&start=0&count=100&output=atom"
-    headers = {"User-Agent": f"EagleEye Research ({SEC_CONTACT})"}
+# SECURE DATA LINK: Use your actual GitHub username/repo
+GITHUB_USER = "YOUR_USERNAME" 
+REPO_NAME = "YOUR_REPO"
+URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{REPO_NAME}/main/latest_trades.csv"
+
+@st.cache_data(ttl=300)
+def load_data():
+    return pd.read_csv(URL)
+
+try:
+    df = load_data()
+    df['Value'] = pd.to_numeric(df['Value'])
     
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        
-        root = ET.fromstring(response.content)
-        ns = {'atom': 'http://www.w3.org/2005/Atom'}
-        
-        data = []
-        for entry in root.findall('atom:entry', ns):
-            title = entry.find('atom:title', ns).text
-            parts = title.split(' - ')
-            if len(parts) >= 3:
-                data.append({
-                    "Date": entry.find('atom:updated', ns).text[:10],
-                    "Ticker": parts[1],
-                    "Insider": parts[2].split(' (')[0],
-                    "Link": entry.find('atom:link', ns).attrib['href']
-                })
-        
-        # Save to CSV in the repo
-        df = pd.DataFrame(data)
-        df.to_csv("latest_trades.csv", index=False)
-        print(f"✅ Saved {len(df)} trades to CSV.")
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    # Whale & Cluster Highlights
+    whales = df[df['Value'] >= 250000]
+    clusters = df.groupby('Ticker').filter(lambda x: len(x) >= 2)
 
-if __name__ == "__main__":
-    fetch_and_save()
+    st.subheader("🐋 Whales & 🔥 Clusters")
+    st.dataframe(pd.concat([whales, clusters]).drop_duplicates(), use_container_width=True)
+    
+    st.divider()
+    st.subheader("All Recent Filings")
+    st.dataframe(df, use_container_width=True)
+
+except:
+    st.warning("Dashboard is syncing... check GitHub Actions for status.")
