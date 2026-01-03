@@ -4,16 +4,16 @@ on:
     - cron: '0 * * * *'
   workflow_dispatch:
 jobs:
-  run-tracker:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # 👈 CRITICAL: Allows the bot to save the CSV
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Install
+      - name: Dependencies
         run: pip install pandas requests
       - name: Run
         env:
@@ -23,5 +23,5 @@ jobs:
           git config --global user.name "EagleEyeBot"
           git config --global user.email "bot@eagleeye.com"
           git add latest_trades.csv
-          git commit -m "Update insider data [skip ci]" || echo "No changes"
+          git commit -m "Update Trades" || echo "No changes"
           git push
