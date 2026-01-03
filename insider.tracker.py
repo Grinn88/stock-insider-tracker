@@ -3,39 +3,85 @@ import requests
 import xml.etree.ElementTree as ET
 import smtplib
 from email.message import EmailMessage
+from collections import defaultdict
 
-# Configuration
-SEC_EMAIL = "rohansofra81@gmail.com" # Identify yourself to SEC
-SENDER_EMAIL = "rohansofra81@gmail.com"
-SENDER_PASS = os.environ.get('EMAIL_PASSWORD')
+# SEC Identity (Required)
+SEC_HEADERS = {"User-Agent": "EagleEye Tracker (rohansofra81@gmail.com)"}
 
-def run_free_tracker():
-    # 1. Fetch from SEC RSS
-    url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&owner=only&start=0&count=40&output=atom"
-    headers = {"User-Agent": f"InsiderBot ({SEC_EMAIL})"}
-    
-    response = requests.get(url, headers=headers)
-    root = ET.fromstring(response.content)
+def get_transaction_value(xml_url):
+    """Parses the actual Form 4 XML to find the dollar value."""
+    try:
+        resp = requests.get(xml_url, headers=SEC_HEADERS)
+        root = ET.fromstring(resp.content)
+        
+        total_value = 0
+        # Search for non-derivative transactions (Open Market Buys)
+        for trans in root.findall(".//nonDerivativeTransaction"):
+            # 'P' stands for Purchase
+            code = trans.find(".//transactionCode")
+            if code is not None and code.text == 'P':
+                shares = float(trans.find(".//transactionShares/value").text or 0)
+                price = float(trans.find(".//transactionPricePerShare/value").text or 0)
+                total_value += (shares * price)
+        return total_value
+    except:
+        return 0
+
+def run_whale_tracker():
+    rss_url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&owner=only&start=0&count=40&output=atom"
+    feed = requests.get(rss_url, headers=SEC_HEADERS).text
+    root = ET.fromstring(feed)
     ns = {'atom': 'http://www.w3.org/2005/Atom'}
+
+    ticker_buys = defaultdict(list)
     
-    signals = []
     for entry in root.findall('atom:entry', ns):
         title = entry.find('atom:title', ns).text
+        # Extract Ticker from: "4 - AAPL - Cook Tim"
+        ticker = title.split(' - ')[1]
         link = entry.find('atom:link', ns).attrib['href']
-        signals.append(f"• {title}\nLink: {link}\n")
+        
+        # Form 4 links to a landing page; we need the .xml file link
+        # Simplified for this example: convert HTML link to XML link
+        xml_link = link.replace("-index.htm", ".xml").replace("ix?doc=/Archives", "/Archives")
+        
+        value = get_transaction_value(xml_link)
+        if value > 0:
+            ticker_buys[ticker].append({
+                "insider": title.split(' - ')[2].split(' (')[0],
+                "value": value,
+                "link": link
+            })
 
-    if signals:
-        # 2. Send Email
-        msg = EmailMessage()
-        msg['Subject'] = f"🚨 Eagle Eye: {len(signals)} New Insider Filings"
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = SENDER_EMAIL
-        msg.set_content("The following insiders just filed Form 4s with the SEC:\n\n" + "\n".join(signals))
+    # Prepare Alert Body
+    email_body = ""
+    for ticker, trades in ticker_buys.items():
+        is_cluster = len(trades) >= 2
+        total_ticker_value = sum(t['value'] for t in trades)
+        
+        prefix = ""
+        if is_cluster: prefix += "🔥 CLUSTER "
+        if total_ticker_value > 250000: prefix += "🐋 WHALE ALERT "
+        
+        if prefix:
+            email_body += f"{prefix}\nTicker: {ticker}\nTotal Value: ${total_ticker_value:,.20f}\n"
+            for t in trades:
+                email_body += f"- {t['insider']} bought ${t['value']:,.0f}\n"
+            email_body += f"Link: {trades[0]['link']}\n\n"
 
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(SENDER_EMAIL, SENDER_PASS)
-            smtp.send_message(msg)
-        print("✅ Free SEC Alert Sent!")
+    if email_body:
+        send_email(email_body)
+
+def send_email(content):
+    msg = EmailMessage()
+    msg['Subject'] = "🚨 HIGH CONVICTION: Insider Whale/Cluster Detected"
+    msg['From'] = "rohansofra81@gmail.com"
+    msg['To'] = "rohansofra81@gmail.com"
+    msg.set_content(content)
+    
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        smtp.login("rohansofra81@gmail.com", os.environ.get('EMAIL_PASSWORD'))
+        smtp.send_message(msg)
 
 if __name__ == "__main__":
-    run_free_tracker()
+    run_whale_tracker()
