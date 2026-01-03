@@ -1,93 +1,85 @@
 import streamlit as st
 import pandas as pd
 from sec_api import QueryApi
-import requests
-import json
+from datetime import datetime, timedelta
 
-# 1. Setup
-st.set_page_config(page_title="Eagle Eye: Bulletproof", layout="wide")
+# 1. Dashboard Config
+st.set_page_config(page_title="Eagle Eye: Time Machine", layout="wide")
 API_KEY = "c2464017fedbe1b038778e4947735d9aeb9ef2b78b9a5ca3e122a6b8f792bf9c"
+queryApi = QueryApi(api_key=API_KEY)
 
-# 2. Connection Health Check (The Diagnostic)
-def check_api_health():
-    """Checks if the key is active without using a full credit."""
-    url = f"https://api.sec-api.io?token={API_KEY}"
-    try:
-        # We use a POST with a tiny size to test the line
-        test_payload = {"query": "formType:\"4\"", "from": 0, "size": 1}
-        response = requests.post(url, json=test_payload, timeout=10)
-        
-        if response.status_code == 200:
-            return True, "Connected"
-        elif response.status_code == 401:
-            return False, "Invalid API Key"
-        elif response.status_code == 429:
-            return False, "Rate Limited / Out of Credits"
-        else:
-            return False, f"Server Error: {response.status_code}"
-    except Exception as e:
-        return False, f"Connection Failed: {str(e)}"
+# 2. Sidebar Time Controls
+st.sidebar.header("⏳ Time Horizon")
+days_to_lookback = st.sidebar.radio("Select Lookback Period", [30, 60, 90], index=0)
+min_value = st.sidebar.slider("Minimum Buy Value ($)", 50000, 1000000, 250000, step=50000)
 
-# 3. Robust Data Loader
 @st.cache_data(ttl=3600)
-def load_data_robust():
-    # Use the official library but wrap it in a fallback
+def fetch_historical_whales(days):
+    # Calculate the date range for the query
+    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+    end_date = datetime.now().strftime('%Y-%m-%d')
+    
+    # Advanced Query: Form 4 + Purchases + Specific Date Range
+    query_str = f'formType:"4" AND filedAt:[{start_date} TO {end_date}] AND "Purchase"'
+    
     try:
-        queryApi = QueryApi(api_key=API_KEY)
-        
-        # We use the most basic query possible to ensure success
-        # This bypasses date-math which often causes 'No Data' errors
-        search_parameters = {
-            "query": "formType:\"4\" AND \"Purchase\"",
-            "from": "0",
-            "size": "40",
+        query = {
+            "query": query_str,
+            "from": "0", "size": "100", 
             "sort": [{"filedAt": {"order": "desc"}}]
         }
-        
-        response = queryApi.get_filings(search_parameters)
+        response = queryApi.get_filings(query)
         return response.get('filings', [])
-    except Exception:
+    except Exception as e:
+        st.error(f"API Error: {e}")
         return []
 
-# --- UI LOGIC ---
-st.title("🦅 Eagle Eye: Verified Connection")
+# 3. Process & Display
+st.title(f"🐋 Insider Whales: Last {days_to_lookback} Days")
 
-# Run Diagnostic
-is_healthy, status_msg = check_api_health()
+raw_filings = fetch_historical_whales(days_to_lookback)
 
-if is_healthy:
-    st.success(f"✅ System Status: {status_msg}")
-    
-    # Sidebar Filters
-    min_val = st.sidebar.selectbox("Min Trade Value", [250000, 500000, 1000000])
-    
-    filings = load_data_robust()
-    
-    if filings:
-        data = []
-        for f in filings:
-            # Safe extraction
-            txs = f.get('nonDerivativeTable', {}).get('transactions', [])
-            for t in txs:
-                if t.get('coding', {}).get('code') == 'P':
-                    v = float(t.get('amounts', {}).get('shares', 0)) * float(t.get('amounts', {}).get('pricePerShare', 0))
-                    if v >= min_val:
-                        data.append({
-                            "Date": f.get('filedAt', '')[:10],
-                            "Ticker": f.get('ticker'),
-                            "Insider": f.get('reportingName'),
-                            "Value ($)": v,
-                            "Price": float(t.get('amounts', {}).get('pricePerShare', 0)),
-                            "Title": f.get('reportingOwnerRelationship', {}).get('officerTitle', 'Director')
-                        })
+if raw_filings:
+    processed_data = []
+    for f in raw_filings:
+        ticker = f.get('ticker', 'N/A')
+        insider = f.get('reportingName', 'N/A')
+        date = f.get('filedAt', '')[:10]
         
-        if data:
-            df = pd.DataFrame(data).sort_values("Value ($)", ascending=False)
-            st.dataframe(df.style.format({"Value ($)": "${:,.0f}", "Price": "${:,.2f}"}), use_container_width=True, hide_index=True)
-        else:
-            st.info(f"Connected, but no trades found over ${min_val:,} today.")
+        # Extract specific transaction amounts
+        transactions = f.get('nonDerivativeTable', {}).get('transactions', [])
+        for t in transactions:
+            if t.get('coding', {}).get('code') == 'P':
+                qty = float(t.get('amounts', {}).get('shares', 0))
+                price = float(t.get('amounts', {}).get('pricePerShare', 0))
+                val = qty * price
+                
+                if val >= min_value:
+                    processed_data.append({
+                        "Date": date,
+                        "Ticker": ticker,
+                        "Insider": insider,
+                        "Value ($)": val,
+                        "Price": price,
+                        "Shares": qty
+                    })
+
+    if processed_data:
+        df = pd.DataFrame(processed_data)
+        
+        # Summary Metrics
+        m1, m2 = st.columns(2)
+        m1.metric("Total High-Value Buys", len(df))
+        m2.metric("Total Capital Flow", f"${df['Value ($)'].sum():,.0f}")
+        
+        # Data Table
+        st.dataframe(
+            df.sort_values("Value ($)", ascending=False).style.format({
+                "Value ($)": "${:,.0f}", "Price": "${:,.2f}", "Shares": "{:,.0f}"
+            }), 
+            use_container_width=True, hide_index=True
+        )
     else:
-        st.warning("The SEC database is responding but returned no purchase data for this window.")
+        st.warning(f"No buys over ${min_value:,} found in the last {days_to_lookback} days.")
 else:
-    st.error(f"🛑 Connection Blocked: {status_msg}")
-    st.info("Try turning off your VPN or checking if your company firewall blocks 'api.sec-api.io'.")
+    st.info("No filings found for this period. Try increasing the lookback or lowering the minimum value.")
