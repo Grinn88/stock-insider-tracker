@@ -2,28 +2,33 @@ name: Insider Tracker Automation
 
 on:
   schedule:
-    - cron: '0 * * * *'  # This tells GitHub to run every hour
-  workflow_dispatch:      # This adds a button so you can test it manually
+    # Runs at the top of every hour (UTC)
+    - cron: '0 * * * *'  
+  workflow_dispatch:      # Manual trigger button in the Actions tab
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.10'
+          cache: 'pip' # Speeds up subsequent runs by caching dependencies
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run tracker script
+      - name: Run Tracker Script
         env:
-          SEC_API_KEY: ${{ secrets.SEC_API_KEY }}
+          # We no longer need SEC_API_KEY for the direct RSS feed, 
+          # but keeping EMAIL_PASSWORD for the alert system.
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          # SEC compliance: The script uses this to identify itself
+          USER_EMAIL: "rohansofra81@gmail.com" 
         run: python insider.tracker.py
