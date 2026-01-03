@@ -5,9 +5,9 @@ st.set_page_config(page_title="Eagle Eye Dashboard", layout="wide")
 st.title("🦅 Eagle Eye: Insider Terminal")
 
 # 🛑 REPLACE THESE WITH YOUR INFO
-USER = "YOUR_GITHUB_USERNAME"
-REPO = "YOUR_REPO_NAME"
-URL = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/latest_trades.csv"
+USER = "Grinn88"
+REPO = "stock-insider-tracker"
+URL = f"https://github.com/Grinn88/stock-insider-tracker/edit/main/insider_app.py"
 
 @st.cache_data(ttl=300)
 def load_data():
