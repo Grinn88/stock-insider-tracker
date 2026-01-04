@@ -1,12 +1,14 @@
 import streamlit as st
 import pandas as pd
+import time
 
-# 🛑 CONFIGURATION - PLEASE VERIFY THESE CAREFULLY
-USER = "GRIN88"
-REPO = "stock-insider-tracker"  # <--- Change this if your repo folder name is different!
+# --- CONFIGURATION ---
+# These must match your GitHub account exactly
+USER = "Grinn88"
+REPO = "stock-insider-tracker"
 
-# This URL uses the "Raw" format which is the ONLY way Streamlit can read the file
-RAW_URL = f"https://github.com/Grinn88/stock-insider-tracker/edit/main/insider_app.py"
+# CORRECT RAW URL: Pointing to the data file, not the code file
+RAW_URL = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/latest_trades.csv"
 
 st.set_page_config(page_title="Eagle Eye Dashboard", layout="wide")
 st.title("🦅 Eagle Eye: Insider Terminal")
@@ -14,21 +16,32 @@ st.title("🦅 Eagle Eye: Insider Terminal")
 @st.cache_data(ttl=60)
 def load_data():
     try:
-        # We add a random number to the URL to force GitHub to send the newest version
-        timestamp_url = f"{RAW_URL}?nocache={pd.Timestamp.now().timestamp()}"
-        return pd.read_csv(timestamp_url)
+        # The '?t=' forces a fresh download so you don't see old data
+        pull_url = f"{RAW_URL}?t={int(time.time())}"
+        df = pd.read_csv(pull_url)
+        return df
     except Exception as e:
         return None
 
+# --- DASHBOARD UI ---
 df = load_data()
 
 if df is not None:
-    st.success("✅ Dashboard Connected!")
+    st.success("✅ Dashboard Connected to Live SEC Data")
     
-    # Simple formatting: Highlight big trades
-    df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+    # Calculate Whale and Cluster Metrics
+    df['Value'] = pd.to_numeric(df['Value'], errors='coerce').fillna(0)
+    whales = df[df['Value'] >= 250000]
+    clusters = df.groupby('Ticker').filter(lambda x: len(x) >= 2)
+    
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Filings", len(df))
+    c2.metric("Whales ($250k+)", len(whales))
+    c3.metric("Clusters Detected", len(clusters['Ticker'].unique()))
+
+    st.subheader("🔥 High-Conviction Activity")
     st.dataframe(df.sort_values(by="Value", ascending=False), use_container_width=True)
 else:
     st.error("🚨 Data Link Broken")
-    st.write(f"Streamlit is trying to find the data here: `{RAW_URL}`")
-    st.info("If that link looks wrong, please check your REPO name in the code above.")
+    st.info(f"The dashboard is looking for the file `latest_trades.csv` at this link:\n\n`{RAW_URL}`")
+    st.warning("If the link above leads to a '404: Not Found' page, your GitHub Action hasn't created the CSV file yet. Go to your GitHub Actions tab and click 'Run workflow'.")
