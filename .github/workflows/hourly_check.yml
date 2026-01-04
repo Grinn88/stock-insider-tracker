@@ -35,7 +35,7 @@ jobs:
         env:
           # This must match the Secret you created in GitHub Settings
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        run: python insider.tracker.py
+        run: python insider_tracker.py
 
       # 5. Save the results back to GitHub
       - name: Commit and Push CSV
