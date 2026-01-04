@@ -2,46 +2,38 @@ import streamlit as st
 import pandas as pd
 import time
 
-# --- CONFIGURATION ---
-# These must match your GitHub account exactly
+# --- FINAL CONFIGURATION ---
 USER = "Grinn88"
 REPO = "stock-insider-tracker"
+# Ensure this matches the EXACT filename your tracker script saves
+FILENAME = "latest_trades.csv" 
 
-# CORRECT RAW URL: Pointing to the data file, not the code file
-RAW_URL = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/latest_trades.csv"
+RAW_URL = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/{FILENAME}"
 
-st.set_page_config(page_title="Eagle Eye Dashboard", layout="wide")
+st.set_page_config(page_title="Eagle Eye Terminal", layout="wide")
 st.title("🦅 Eagle Eye: Insider Terminal")
 
 @st.cache_data(ttl=60)
 def load_data():
     try:
-        # The '?t=' forces a fresh download so you don't see old data
-        pull_url = f"{RAW_URL}?t={int(time.time())}"
-        df = pd.read_csv(pull_url)
+        # The '?cache=' forces GitHub to give us the absolute latest version
+        cache_buster_url = f"{RAW_URL}?cache={int(time.time())}"
+        df = pd.read_csv(cache_buster_url)
         return df
     except Exception as e:
         return None
 
-# --- DASHBOARD UI ---
 df = load_data()
 
 if df is not None:
-    st.success("✅ Dashboard Connected to Live SEC Data")
+    st.success(f"✅ Connection Stable | {len(df)} Trades in Feed")
     
-    # Calculate Whale and Cluster Metrics
+    # Simple Whale/Cluster Logic
     df['Value'] = pd.to_numeric(df['Value'], errors='coerce').fillna(0)
-    whales = df[df['Value'] >= 250000]
-    clusters = df.groupby('Ticker').filter(lambda x: len(x) >= 2)
     
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Filings", len(df))
-    c2.metric("Whales ($250k+)", len(whales))
-    c3.metric("Clusters Detected", len(clusters['Ticker'].unique()))
-
-    st.subheader("🔥 High-Conviction Activity")
+    st.subheader("🔥 High-Conviction Dashboard")
     st.dataframe(df.sort_values(by="Value", ascending=False), use_container_width=True)
 else:
     st.error("🚨 Data Link Broken")
-    st.info(f"The dashboard is looking for the file `latest_trades.csv` at this link:\n\n`{RAW_URL}`")
-    st.warning("If the link above leads to a '404: Not Found' page, your GitHub Action hasn't created the CSV file yet. Go to your GitHub Actions tab and click 'Run workflow'.")
+    st.write(f"I am looking for your data at this link: `{RAW_URL}`")
+    st.info("💡 **Final Fix:** Go to your GitHub Code tab. If you don't see 'latest_trades.csv' in the file list, your Action ran but failed to 'Push' the file. Check your 'Workflow Permissions' in Settings.")
