@@ -1,27 +1,48 @@
 name: Insider Tracker Automation
+
 on:
   schedule:
+    # Runs every hour
     - cron: '0 * * * *'
+  # Allows you to run it manually anytime for testing
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    
+    # CRITICAL: This gives the bot permission to save the CSV to your repo
     permissions:
-      contents: write # 👈 CRITICAL: Allows the bot to save the CSV
+      contents: write
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # 1. Pull the latest code from your repo
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. Install Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Dependencies
+
+      # 3. Install required libraries
+      - name: Install Dependencies
         run: pip install pandas requests
-      - name: Run
+
+      # 4. Run your tracking script
+      - name: Run Tracker Script
         env:
+          # This must match the Secret you created in GitHub Settings
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        run: python insider.tracker.py
+
+      # 5. Save the results back to GitHub
+      - name: Commit and Push CSV
         run: |
-          python insider.tracker.py
           git config --global user.name "EagleEyeBot"
           git config --global user.email "bot@eagleeye.com"
           git add latest_trades.csv
-          git commit -m "Update Trades" || echo "No changes"
+          # Only commit if the file actually changed to avoid errors
+          git commit -m "Update latest trades: $(date)" || echo "No changes to commit"
           git push
